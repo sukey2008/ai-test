@@ -2,56 +2,244 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <title>AI 调试</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AI 对话调试（多轮 + 记录）</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 16px; }
-    textarea { width: 100%; height: 140px; }
-    button { padding: 10px 16px; margin-top: 8px; }
-    .out { white-space: pre-wrap; background: #f6f8fa; padding: 12px; border-radius: 8px; margin-top: 16px; }
+    :root { --bg:#0f172a; --panel:#111827; --card:#0b1220; --text:#e5e7eb; --sub:#9ca3af; --me:#2563eb; --ai:#16a34a; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:linear-gradient(180deg,#0b1020,#0b1120 40%,#0b1020); color:var(--text); font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;}
+    .wrap { max-width: 920px; margin: 0 auto; padding: 24px 16px 120px; }
+    .header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; }
+    .title { font-weight:700; font-size:20px; letter-spacing:.3px; }
+    .actions { display:flex; gap:8px; }
+    .btn { background:#1f2937; color:var(--text); border:1px solid #374151; padding:8px 12px; border-radius:10px; cursor:pointer; }
+    .btn:hover { background:#243042; }
+    .btn.primary { background:#2563eb; border-color:#1d4ed8; }
+    .btn.primary:hover { background:#1d4ed8; }
+    .chat { display:flex; flex-direction:column; gap:12px; }
+    .msg { display:flex; gap:12px; align-items:flex-start; }
+    .avatar { width:32px; height:32px; border-radius:50%; flex:0 0 auto; display:grid; place-items:center; font-size:13px; color:#fff; }
+    .avatar.me { background:var(--me); }
+    .avatar.ai { background:var(--ai); }
+    .bubble { background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); padding:12px 14px; border-radius:14px; max-width: 80%; white-space:pre-wrap; word-break:break-word; line-height:1.5; }
+    .who { font-size:12px; color:var(--sub); margin-bottom:6px; }
+    .composer { position: fixed; left:0; right:0; bottom:0; background:linear-gradient(180deg, transparent, rgba(0,0,0,.55) 14%, rgba(0,0,0,.75)); padding:16px; }
+    .composer .inner { max-width:920px; margin:0 auto; background:var(--panel); border:1px solid #374151; border-radius:14px; padding:10px; display:flex; gap:10px; }
+    textarea { resize: vertical; min-height: 56px; max-height: 180px; flex:1; background:transparent; color:var(--text); border:none; outline:none; font: inherit; }
+    .send { align-self:flex-end; }
+    .hint { color:var(--sub); font-size:12px; margin-top:6px; text-align:right; }
+    .status { color:var(--sub); font-size:12px; margin-left:8px; }
+    .empty { color:var(--sub); text-align:center; padding:24px 0; }
+    a, a:visited { color:#93c5fd; text-decoration: none; }
+    .spinner { display:inline-block; width:14px; height:14px; border:2px solid #ffffff55; border-top-color:#fff; border-radius:50%; animation: spin 1s linear infinite; vertical-align:-2px; margin-right:6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (max-width: 640px){ .bubble{max-width: 100%;} }
   </style>
 </head>
 <body>
-  <h1>简单问答调试</h1>
-  <textarea id="q" placeholder="请输入你的问题..."></textarea><br/>
-  <button id="go">发送</button>
-  <div id="out" class="out"></div>
+  <div class="wrap">
+    <div class="header">
+      <div class="title">AI 对话调试（浏览器直连，仅限临时）</div>
+      <div class="actions">
+        <button class="btn" id="btn-export">导出JSON</button>
+        <button class="btn" id="btn-import">导入JSON</button>
+        <button class="btn" id="btn-clear">清空历史</button>
+        <span class="status" id="status"></span>
+      </div>
+    </div>
+
+    <div id="chat" class="chat"></div>
+    <div id="empty" class="empty" style="display:none">还没有消息，来问点什么吧～</div>
+  </div>
+
+  <div class="composer">
+    <div class="inner">
+      <textarea id="input" placeholder="输入问题…（Ctrl/⌘ + Enter 发送）"></textarea>
+      <button class="btn primary send" id="send">发送</button>
+    </div>
+    <div class="hint">提示：支持多轮对话；刷新后记录保留（本地存储）。</div>
+  </div>
 
 <script>
-const API_KEY = "sk-30mPLxMC1sIGF8B-X7WBTg"; // 
+/* ===================== 配置（仅临时调试，公开会泄露！） ===================== */
+const API_KEY = "sk-30mPLxMC1sIGF8B-X7WBTg"; 
 const API_URL = "https://inference-api.nousresearch.com/v1/chat/completions";
-const MODEL = "DeepHermes-3-Mistral-24B-Preview";
+const MODEL   = "DeepHermes-3-Mistral-24B-Preview";
+const SYSTEM_PROMPT =
+  "You are a helpful assistant. Provide clear, concise answers. Do not include hidden chain-of-thought. If reasoning is necessary, summarize rationale briefly.";
+/* ========================================================================== */
 
-document.getElementById("go").onclick = async () => {
-  const q = document.getElementById("q").value.trim();
-  if (!q) return alert("请输入问题");
-  document.getElementById("out").textContent = "请求中...";
-
-  try {
-    const resp = await fetch(API_URL, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        messages: [
-          { role: "system", content: "You are a helpful assistant. Answer clearly and concisely." },
-          { role: "user", content: q }
-        ],
-        max_tokens: 256
-      })
-    });
-
-    const data = await resp.json();
-    let answer = data?.choices?.[0]?.message?.content || "[空响应]";
-    answer = answer.replace(/<think>[\s\S]*?<\/think>/g, "").trim(); // 去掉 think
-    document.getElementById("out").textContent = answer;
-  } catch (e) {
-    document.getElementById("out").textContent = "请求失败: " + e;
-  }
+const els = {
+  chat:   document.getElementById("chat"),
+  empty:  document.getElementById("empty"),
+  input:  document.getElementById("input"),
+  send:   document.getElementById("send"),
+  status: document.getElementById("status"),
+  btnExport: document.getElementById("btn-export"),
+  btnImport: document.getElementById("btn-import"),
+  btnClear:  document.getElementById("btn-clear"),
 };
+
+const STORE_KEY = "chat_demo_history_v1";
+let history = loadHistory();  // [{role:"user"|"assistant", content:"..."}]
+
+function loadHistory(){
+  try{
+    const raw = localStorage.getItem(STORE_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.slice(0, 200) : [];
+  }catch{ return []; }
+}
+function saveHistory(){
+  try{ localStorage.setItem(STORE_KEY, JSON.stringify(history)); }catch{}
+}
+function clearHistory(){
+  history = [];
+  saveHistory();
+  render();
+}
+function render(){
+  els.chat.innerHTML = "";
+  if (history.length === 0){ els.empty.style.display = ""; return; }
+  els.empty.style.display = "none";
+  for (const m of history){
+    const msg = document.createElement("div");
+    msg.className = "msg";
+
+    const avatar = document.createElement("div");
+    avatar.className = "avatar " + (m.role === "user" ? "me" : "ai");
+    avatar.textContent = m.role === "user" ? "我" : "AI";
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    const who = document.createElement("div");
+    who.className = "who";
+    who.textContent = m.role === "user" ? "你" : "助手";
+    const body = document.createElement("div");
+    body.textContent = m.content;
+
+    bubble.appendChild(who);
+    bubble.appendChild(body);
+
+    msg.appendChild(avatar);
+    msg.appendChild(bubble);
+    els.chat.appendChild(msg);
+  }
+  // 滚动到底部
+  requestAnimationFrame(() => { window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); });
+}
+
+function setBusy(isBusy, text=""){
+  els.send.disabled = isBusy;
+  els.status.innerHTML = isBusy ? `<span class="spinner"></span>${text || "思考中…"}` : text || "";
+}
+
+function stripThink(s){
+  try{ return s.replace(/<think>[\s\S]*?<\/think>/g, "").trim(); }catch{ return s; }
+}
+
+async function callApi(messages){
+  const payload = {
+    model: MODEL,
+    messages,
+    max_tokens: 512,
+    temperature: 0.2,
+  };
+  const resp = await fetch(API_URL, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  const text = await resp.text();
+  let data;
+  try{ data = JSON.parse(text); }catch(e){
+    throw new Error("上游返回非JSON：" + text.slice(0, 300));
+  }
+  if (!resp.ok){
+    const msg = (data && (data.error?.message || data.error || JSON.stringify(data))) || resp.statusText;
+    throw new Error("API 错误：" + msg);
+  }
+  let content = data?.choices?.[0]?.message?.content ?? "";
+  content = stripThink(String(content));
+  return content || "[空响应]";
+}
+
+async function sendMessage(){
+  const q = els.input.value.trim();
+  if (!q){ els.input.focus(); return; }
+
+  // 1) 先把用户消息加入历史并渲染
+  history.push({ role: "user", content: q });
+  saveHistory();
+  render();
+
+  els.input.value = "";
+  setBusy(true);
+
+  try{
+    // 2) 组织带上下文的 messages（包含 system + 全部历史）
+    const messages = [{ role: "system", content: SYSTEM_PROMPT }]
+      .concat(history.map(m => ({ role: m.role, content: m.content })));
+
+    // 3) 调用 API
+    const answer = await callApi(messages);
+
+    // 4) 写入助手回复并渲染
+    history.push({ role: "assistant", content: answer });
+    saveHistory();
+    render();
+    setBusy(false, "完成");
+  }catch(e){
+    setBusy(false, "出错");
+    const msg = "请求失败：" + (e?.message || e);
+    history.push({ role: "assistant", content: msg });
+    saveHistory();
+    render();
+  }
+}
+
+// 事件绑定
+els.send.addEventListener("click", sendMessage);
+els.input.addEventListener("keydown", (e) => {
+  // Ctrl/⌘ + Enter 发送；单独 Enter 换行
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter"){
+    e.preventDefault();
+    sendMessage();
+  }
+});
+// 导出/导入/清空
+els.btnExport.addEventListener("click", () => {
+  const blob = new Blob([JSON.stringify(history, null, 2)], {type:"application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "chat-history.json"; a.click();
+  URL.revokeObjectURL(url);
+});
+els.btnImport.addEventListener("click", async () => {
+  const inp = document.createElement("input");
+  inp.type = "file"; inp.accept = "application/json";
+  inp.onchange = async () => {
+    const file = inp.files?.[0]; if (!file) return;
+    try{
+      const text = await file.text();
+      const arr = JSON.parse(text);
+      if (!Array.isArray(arr)) throw new Error("不是数组");
+      history = arr.map(x => ({ role: x.role, content: String(x.content ?? "") })).slice(0, 200);
+      saveHistory(); render();
+    }catch(e){ alert("导入失败：" + (e?.message || e)); }
+  };
+  inp.click();
+});
+els.btnClear.addEventListener("click", () => {
+  if (confirm("确定清空本地对话历史吗？此操作不可恢复。")) clearHistory();
+});
+
+// 首次渲染
+render();
 </script>
 </body>
 </html>
